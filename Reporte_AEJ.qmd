@@ -1,0 +1,2347 @@
+---
+title: "Desarrollo de Infraestructura de Datos AEJ + Dashboard"
+subtitle: "Reporte de Avances 2024-2025"
+author: "Frank Leyva"
+format: 
+  html:
+    theme: cosmo
+    css: custom.scss
+    toc: false
+    code-fold: true
+    code-tools: true
+    mainfont: "Open Sans"
+    monofont: "Fira Code"
+server: shiny
+---
+
+
+
+```{r setup, include=FALSE}
+#| setup, include=FALSE
+library(tidyverse)
+library(plotly)
+library(visNetwork)
+library(timevis)
+library(shiny)
+library(DT)
+library(DiagrammeR)
+library(stringdist)
+library(highcharter)
+library(viridis)
+library(wordcloud2)
+library(tidytext)
+library(topicmodels)
+library(tm)
+library(shinyjs)
+library(sf)
+library(geojsonio)
+
+theme_colors <- list(
+  primary = "#086788",    # Dark blue
+  secondary = "#16A085",  # Teal
+  accent = "#F39C12",     # Orange
+  background = "#ECF0F1", # Light gray
+  text = "#2C3E50",       # Dark blue
+  grid = "#95A5A6"        # Medium gray
+)
+
+series_colors <- c("#2C3E50", "#16A085", "#F39C12", "#E74C3C", "#8E44AD")
+years <- 2027:2032
+time_data <- list(
+  "019" = c(8.6, 8.7, 8.5, 8.8, 8.7, 8.9),
+  "037" = c(7.8, 8.0, 8.1, 8.2, 8.3, 8.4),
+  "017" = c(7.6, 7.8, 7.9, 8.0, 8.1, 8.2),
+  "050" = c(8.9, 8.8, 8.7, 8.9, 9.0, 9.1)
+)
+mun_names <- list(
+  "017" = "Cuauhtemoc",
+  "019" = "Chihuahua",
+  "050" = "Nuevo Casas Grandes",
+  "037" = "Juarez"
+)
+
+char_vector <- sprintf("%03d", 1:67)
+num_vector <- rep(NA, 67) #
+num_vector[c(17, 19, 37, 50)] <- c(7.6, 8.6, 7.8, 8.9) 
+test_vector <- rnorm(67,8.5,.2)
+shihuahua_sf <- st_read('shihuahua.geojson')
+shihuahua_json <- geojson_list(shihuahua_sf)
+shihuahua_satisf <- data.frame(CVE_MUN= char_vector, satisfaction= num_vector, test=test_vector)
+shihuahua_satisf <- shihuahua_satisf %>%
+  mutate(
+    classification = case_when(
+      CVE_MUN %in% c("019", "037") ~ "Urbano",
+      CVE_MUN %in% c("017", "050") ~ "Semi-urbano",
+      TRUE ~ "No clasificado"
+    ),
+    color = case_when(
+      CVE_MUN %in% c("019", "037") ~ "#0000FF",  # Blue for urban
+      CVE_MUN %in% c("017", "050") ~ "#FF8C00",  # Orange for semi-urban
+      TRUE ~ "transparent"
+    )
+  )
+theme_custom <- function() {
+  theme_minimal() %+replace%
+  theme(
+    text = element_text(family = "Montserrat", color = theme_colors$primary),
+    plot.title = element_text(size = 14, face = "bold", color = theme_colors$primary),
+    axis.title = element_text(size = 12, color = theme_colors$primary),
+    axis.text = element_text(size = 10, color = theme_colors$primary),
+    panel.grid.major = element_line(color = theme_colors$grid, linewidth = 0.2),
+    panel.grid.minor = element_line(color = theme_colors$grid, linewidth = 0.1),
+    legend.position = "none",
+    legend.box = "none",
+    legend.key = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_blank()
+  )
+}
+set.seed(123)
+years <- 2015:2024
+districts <- c("Distrito 1", "Distrito 2", "Distrito 3", "Distrito 4")
+
+generate_satisfaction <- function(mean) {
+  pmin(pmax(rnorm(10, mean, 0.3), 1), 10)
+}
+
+data <- data.frame(
+  year = rep(years, times = 4),
+  district = rep(districts, each = 10),
+  satisfaction = c(
+    generate_satisfaction(6),  # Distrito 1
+    generate_satisfaction(5.5),  # Distrito 2
+    generate_satisfaction(5),  # Distrito 3
+    generate_satisfaction(4.5)  # Distrito 4
+  )
+)
+# Spanish stop words
+data("stop_words")
+stop_words_es <- c(stop_words$word, 
+                   "el", "la", "los", "las", "un", "una", "unos", "unas",
+                   "y", "o", "pero", "si", "no", "que", "cual", "quien",
+                   "cuyo", "donde", "cuando", "como", "por", "para")
+
+
+pred_data <- data.frame(
+  year = 2014:2027,
+  value = c(
+    # Historical data (2014-2024)
+    8.29, 8.29, 8.81, 8.41, 8.13, 8.55, 8.46, 8.5, 8.62, 8.39, 8.69,
+    # Predictions (2025-2027)
+    8.43, 8.6, 8.83
+  ),
+  error_low = c(
+    # Historical data - no confidence intervals
+    rep(NA, 11),
+    # Predictions with confidence intervals
+    8.28, 8.2, 8.23
+  ),
+  error_high = c(
+    # Historical data - no confidence intervals
+    rep(NA, 11),
+    # Predictions with confidence intervals
+    8.58, 9.02, 9.43
+  )
+)
+# Compute indices for x-axis (0-based indexing)
+n_hist <- sum(pred_data$year <= 2024)
+total_points <- nrow(pred_data)
+
+# Prepare historical data with explicit x-values
+historical_data <- data.frame(
+  x = 0:(n_hist - 1),  # Indices 0 to n_hist - 1 for years 2014-2024
+  y = pred_data$value[pred_data$year <= 2024]
+)
+
+# Prepare prediction data with explicit x-values
+prediction_data <- data.frame(
+  x = n_hist:(total_points - 1),  # Indices n_hist to total_points - 1 for years 2025-2027
+  y = pred_data$value[pred_data$year >= 2025]
+)
+
+# Prepare arearange data for confidence intervals (including 2025)
+arearange_data <- data.frame(
+  x = prediction_data$x,
+  low = pred_data$error_low[pred_data$year >= 2025],
+  high = pred_data$error_high[pred_data$year >= 2025]
+)
+
+# Prepare the connecting line from 2024 to 2025
+connecting_line_data <- data.frame(
+  x = c(n_hist - 1, n_hist),  # Indices for 2024 and 2025
+  y = pred_data$value[pred_data$year %in% c(2024, 2025)] 
+  )# Values for 2024 and 2025
+
+
+# Create a color vector for points
+colors <- ifelse(pred_data$year > 2024, "orange", "blue")
+
+years <- 2027:2032
+municipalities <- data.frame(
+  code = c("017", "019", "037", "050"),
+  name = c("Municipio 17", "Municipio 19", "Municipio 37", "Municipio 50"),
+  classification = c("Semi-urbano", "Urbano", "Urbano", "Semi-urbano")
+)
+
+# Create simulated time series data for each municipality
+# We'll use the current satisfaction values as base and add some variation
+set.seed(123) # For reproducibility
+time_data <- list()
+
+for(mun in municipalities$code) {
+  base_value <- shihuahua_satisf$satisfaction[shihuahua_satisf$CVE_MUN == mun]
+  # Generate slightly varying values for each year
+  yearly_data <- base_value + rnorm(length(years), mean = 0, sd = 0.3)
+  time_data[[mun]] <- yearly_data
+}
+mun_names <- c(
+  "017" = "Cuauhtemoc",
+  "019" = "Chihuahua",
+  "050" = "Nuevo Casas Grandes",
+  "037" = "Juarez"
+)
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+## Resumen Ejecutivo {.unnumbered}
+
+Plan Estratégico de Juárez se encuentra en un momento crucial de transformación digital, con la modernización de su infraestructura de datos como pieza fundamental para potenciar su impacto en la comunidad. Este documento presenta nuestra visión y plan de implementación para los próximos años, centrado en la evolución del sistema de gestión de datos de las encuestas **"Así Estamos Juárez" (AEJ)**.
+
+### Visión Estratégica
+Estamos desarrollando una infraestructura integral que no solo preservará la riqueza histórica de nuestros datos, sino que también nos permitirá realizar análisis más sofisticados y predictivos. Esta transformación mejorará significativamente nuestra capacidad para entender y responder a las necesidades de la ciudad.
+
+### Avances Significativos
+Hemos logrado progresos sustanciales en tres áreas fundamentales:
+
+1. **Base de Datos Adaptativa**: Hemos diseñado e iniciado la implementación de una estructura que preserva la integridad histórica de nuestros datos mientras facilita su evolución futura. Esta base permite manejar eficientemente la complejidad de nuestras encuestas, incluyendo preguntas que cambian año con año.
+
+2. **Procesos ETL Robustos**: Hemos desarrollado procedimientos sistemáticos para la extracción, transformación y carga de datos, garantizando la calidad y consistencia de la información. Estos procesos son fundamentales para la migración de datos históricos y el manejo de futuras encuestas.
+
+3. **Visualización Interactiva**: Estamos creando dashboards dinámicos que permitirán un acceso más intuitivo y profundo a nuestros datos, facilitando la toma de decisiones informada.
+
+### Próximas Fases
+Nuestro plan se extiende más allá de la infraestructura básica, contemplando:
+- Análisis histórico comprehensivo de todas las encuestas AEJ
+- Rediseño estratégico de encuestas con énfasis en salud mental y economía conductual
+- Desarrollo de modelos predictivos y geo-estadísticos
+- Implementación de análisis espacio-temporal para evaluación de intervenciones
+
+### Impacto Esperado
+Esta modernización fortalecerá significativamente nuestra capacidad para:
+- Realizar análisis más profundos y predictivos
+- Responder ágilmente a las necesidades cambiantes de la ciudad
+- Evaluar efectivamente el impacto de intervenciones comunitarias
+- Proporcionar evidencia sólida para la toma de decisiones
+
+El proyecto representa una inversión estratégica en nuestras capacidades analíticas, posicionando a Plan Estratégico de Juárez como un referente en el uso de datos para el desarrollo comunitario.
+
+
+```{r timeline}
+#| context: setup
+timeline_data <- data.frame(
+  id = 1:7,
+  content = c(
+    "Desarrollo del Modelo Entidad-Relacion",
+    "Pausa: Informe This is El Paso",
+    "Primer ETL Funcional - Encuesta 2021",
+    "Desarrollo del Dashboard",
+    "Prototipo Dashboard Visual",
+    "Pausa: Conferencia ONGs",
+    "Reanudacion del Desarrollo"
+  ),
+  start = as.Date(c(
+    "2024-10-24",
+    "2024-11-01",
+    "2024-11-01",
+    "2025-01-10",
+    "2025-01-30",
+    "2025-02-01",
+    "2025-02-15"
+  )),
+  end = as.Date(c(
+    NA,
+    "2024-11-15",
+    NA,
+    "2025-01-30",
+    NA,
+    "2025-02-15",
+    "2025-03-01"
+  )),
+  type = c(
+    "point",
+    "background",
+    "point",
+    "range",
+    "point",
+    "background",
+    "range"
+  ),
+  group = c(
+    1, 2, 1, 1, 1, 2, 1
+  ),
+  style = c(
+    "color: #2c3e50;",
+    "background-color: #ffecb3;",
+    "color: #2c3e50;",
+    "color: white; background-color: #3498db;",
+    "color: #2c3e50;",
+    "background-color: #ffecb3;",
+    "color: white; background-color: #3498db;"
+  )
+)
+
+timeline_groups <- data.frame(
+  id = 1:2,
+  content = c("Desarrollo", "Pausas"),
+  style = c(
+    paste0("color: ", theme_colors$primary, ";"),
+    paste0("color: ", theme_colors$accent, ";")
+  )
+)
+timeline_data$style <- case_when(
+  timeline_data$type == "point" ~ paste0("color: ", theme_colors$primary, ";"),
+  timeline_data$type == "background" & timeline_data$group == 2 ~ 
+    paste0("background-color: ", adjustcolor(theme_colors$accent, alpha.f = 0.2), ";"),
+  TRUE ~ paste0("color: white; background-color: ", theme_colors$secondary, ";")
+)
+```
+
+```{r timeline-panel}
+#| panel: fill
+fluidRow(
+  column(12,
+    div(class = "section-header",
+      h2("Desarrollo del Proyecto hasta la fecha"),
+      p("La evolución de nuestra infraestructura de datos refleja un enfoque metódico y adaptativo, 
+        respondiendo a las necesidades cambiantes de la organización mientras mantenemos el progreso 
+        hacia nuestros objetivos estratégicos.")
+    )
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h4("Hitos Estratégicos", style = "color: #2C3E50;"),
+      p("El desarrollo ha seguido una trayectoria estructurada, marcada por logros significativos:"),
+      tags$ul(
+        tags$li(strong("Modelo Entidad-Relación"), " (24 de octubre 2024): 
+                Establecimiento de la arquitectura fundamental que permite la flexibilidad y 
+                escalabilidad necesarias para manejar datos históricos y futuros."),
+        tags$li(strong("ETL Funcional"), " (1 de noviembre 2024): 
+                Implementación exitosa del primer proceso de extracción, transformación y carga 
+                de datos con la encuesta 2021, validando nuestra arquitectura."),
+        tags$li(strong("Desarrollo del Dashboard"), " (10 de enero 2025): 
+                Inicio del desarrollo de herramientas de visualización interactivas para 
+                facilitar el análisis y la presentación de datos."),
+        tags$li(strong("Prototipo Visual"), " (30 de enero 2025): 
+                Demostración funcional de las capacidades de visualización, estableciendo la 
+                base para futuras iteraciones.")
+      )
+    )
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h4("Adaptabilidad y Continuidad", style = "color: #2C3E50;"),
+      p("Durante este período, el proyecto ha demostrado su capacidad de adaptación, 
+        incorporando pausas estratégicas para atender necesidades organizacionales prioritarias:"),
+      tags$ul(
+        tags$li(strong("Informe 'This is El Paso'"), ": Pausa estratégica durante la primera 
+                semana de noviembre, permitiendo la atención a un proyecto regional prioritario."),
+        tags$li(strong("Conferencia de ONGs"), ": Período de adaptación durante la primera 
+                semana de febrero, facilitando la participación en un evento crucial para el 
+                desarrollo de redes interinstitucionales.")
+      ),
+      p("Estas pausas, lejos de representar interrupciones, han enriquecido nuestra perspectiva 
+        y contribuido a un desarrollo más robusto del proyecto.")
+    )
+  ),
+  column(12,
+    timevisOutput("timeline")
+  )
+)
+```
+
+
+```{r timeline-server}
+#| context: server
+
+output$timeline <- renderTimevis({
+  timevis(
+    data = timeline_data,
+    groups = timeline_groups,
+    options = list(
+      stack = TRUE,
+      showCurrentTime = FALSE,
+      height = "400px",
+      margin = list(
+        item = 20,
+        axis = 40
+      )
+    )
+  )
+})
+```
+
+## Desarrollo de Base de Datos
+
+El diseño de nuestra infraestructura de datos representa un avance significativo en la capacidad analítica de Plan Estratégico de Juárez. La arquitectura implementada no solo preserva nuestra historia de datos sino que también nos posiciona estratégicamente para el futuro.
+
+### Arquitectura Flexible y Adaptativa
+
+Hemos desarrollado un modelo de base de datos que responde a los desafíos únicos de nuestras encuestas, considerando:
+
+
+
+```{r ERD-panel}
+#| panel: fill
+
+fluidRow(
+  column(6,
+    visNetworkOutput("er_diagram", height = "500px")
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h3("Innovación en el Diseño de Datos", style = "color: #2C3E50;"),
+      p("El núcleo de nuestra arquitectura se centra en un diseño innovador que denominamos QSRT 
+        (Question Survey Response Type). Este enfoque revoluciona nuestra capacidad para:"),
+      
+      tags$ul(
+        tags$li(strong("Preservar la Historia"), ": Mantenemos la integridad de preguntas históricas 
+                mientras permitimos su evolución natural año tras año."),
+        tags$li(strong("Adaptación Dinámica"), ": Una misma pregunta puede evolucionar en su formato 
+                de respuesta sin perder la conexión con sus versiones anteriores."),
+        tags$li(strong("Gestión de Complejidad"), ": Manejamos eficientemente los códigos especiales 
+                (NS/NC/NA) manteniendo la consistencia a través del tiempo."),
+        tags$li(strong("Preparación para el Futuro"), ": La estructura facilita la estandarización 
+                y el análisis comparativo, sin comprometer los datos originales.")
+      ),
+    )
+  )
+)
+
+```
+```{r}
+#| panel: fill
+
+ div(style = "margin-top: 20px; padding: 15px; background-color: #ECF0F1; border-radius: 5px;",
+        h4("Ejemplo Práctico", style = "color: #16A085;"),
+        p("Consideremos la pregunta '¿Qué tan satisfecho está con los servicios públicos?', que ha aparecido en múltiples encuestas:"),
+        tags$ul(
+          tags$li("2021: Escala de 1-5 puntos"),
+          tags$li("2022: Escala de 1-10 puntos"),
+          tags$li("2023: Escala cualitativa")
+        ),
+        p("Nuestra arquitectura mantiene la trazabilidad de estas variaciones mientras permite 
+          análisis comparativos significativos.")
+      )
+```
+
+```{r ERD-server}
+#| context: server
+# Define the nodes data frame
+nodes <- data.frame(
+  id = c("surveys", "questions", "qsrt", "responses", "response_options", "response_type"),
+  label = c("surveys\n(survey_name, year)", "questions\n(question_text,\nhas_parent, is_constructed)",
+            "question_survey_response_type\n(qsrt_id)", "responses\n(participant_id, value)",
+            "response_options\n(original_code, original_label,\nspecial_code_type)", "response_type\n(response_type_name)"),
+  color = c("lightblue", "lightblue", "lightcoral", "lightblue", "lightblue", "lightblue")
+)
+nodes$color <- case_when(
+  nodes$id == "qsrt" ~ theme_colors$accent,  # Highlight QSRT
+  TRUE ~ adjustcolor(theme_colors$grid, alpha.f = 0.7)
+)
+# Define the edges data frame
+edges <- data.frame(
+  from = c("surveys", "questions", "qsrt", "qsrt", "response_type"),
+  to = c("qsrt", "qsrt", "responses", "response_options", "qsrt"),
+  label = c("1:n", "1:n", "1:n", "1:n", "1:n")
+)
+edges$color <- theme_colors$primary
+
+output$er_diagram <- renderVisNetwork({
+ # Create the visNetwork visualization with the additional node and adjusted layout
+visNetwork(nodes, edges) %>%
+  visNodes(shape = "box", font = list(face = 'Helvetica')) %>%
+  visEdges(arrows = "to") %>%
+  visOptions(highlightNearest = TRUE) %>%
+  visLayout(
+    hierarchical = list(
+      enabled = TRUE,
+      direction = "UD",
+      sortMethod = "directed"
+    )
+  ) %>% 
+  visHierarchicalLayout(
+    nodeSpacing = 200,
+    levelSeparation = 150,
+    sortMethod = "directed"
+  )
+})
+```
+
+## Proceso de ETL y Desafíos
+
+La transformación de nuestros datos crudos en información valiosa requiere un proceso meticuloso y bien estructurado. Nuestro enfoque garantiza que cada pieza de información conserve su valor mientras se adapta a nuestra nueva infraestructura.
+
+
+
+```{r ETL-panel}
+fluidRow(
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h3("Sistema de Clasificación Inteligente", style = "color: #2C3E50;"),
+      p("Hemos desarrollado un sistema automatizado que examina y clasifica las preguntas de 
+        nuestras encuestas. Este sistema actúa como un primer filtro, identificando patrones 
+        y estableciendo categorías iniciales para cada tipo de respuesta. El código que se 
+        muestra a la derecha representa el núcleo de este sistema de clasificación."),
+      p("Esta automatización nos permite procesar eficientemente grandes volúmenes de 
+        información histórica, manteniendo la consistencia en nuestros datos mientras 
+        reducimos significativamente el tiempo necesario para su procesamiento.")
+    )
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; background-color: #f8f9fa; border-radius: 5px;",
+      tags$pre(
+        style = "color: #2C3E50; font-family: 'Fira Code', monospace;",
+        code('classified_data <- data %>%
+  mutate(
+    scale_type = case_when(
+      str_detect(tolower(type), "numeric") & 
+      str_detect(label, "escala") ~ "Intervalo",
+      str_detect(type, "haven_labelled") &
+      str_detect(value_labels, "sí|no") ~ "Binaria",
+      has_value_labels ~ "Categórica",
+      TRUE ~ "Necesita Revisión"
+    )
+  )')
+      )
+    )
+  )
+)
+
+fluidRow(
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h3("Estandarización de Respuestas", style = "color: #2C3E50;"),
+      p("La diversidad en los formatos de respuesta a través de los años presenta desafíos 
+        únicos que hemos abordado sistemáticamente. Nuestro proceso maneja eficientemente 
+        diferentes escenarios, como la variación en escalas de medición y la evolución en 
+        el formato de las preguntas."),
+      p("Hemos implementado un sistema de dos niveles para garantizar la calidad de los datos:")
+    )
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h4("Proceso de Validación", style = "color: #16A085;"),
+      p("Nuestro sistema opera en dos fases complementarias:"),
+      p("La clasificación automatizada inicial utiliza algoritmos sofisticados para 
+        identificar patrones y categorizar respuestas, estableciendo una base sólida 
+        para el análisis."),
+      p("La revisión manual especializada emplea un dashboard diseñado específicamente 
+        para verificar y refinar las clasificaciones automáticas, asegurando la 
+        precisión de nuestros datos.")
+    )
+  )
+)
+```
+
+```{r}
+#| panel: fill
+div(
+  style = "margin-top: 40px; padding: 25px; background-color: #ECF0F1; border-radius: 8px;",
+  h3("Ejemplo de Evolución en las Preguntas", style = "color: #2C3E50;"),
+  p("Para ilustrar la complejidad y sofisticación de nuestro sistema, consideremos 
+    la evolución de una pregunta fundamental sobre satisfacción con servicios públicos:"),
+  
+  div(style = "margin: 20px 0;",
+    h4("2021: Escala Simple", style = "color: #16A085;"),
+    p("La pregunta utilizaba una escala de 1 a 5, donde:"),
+    p("1: Muy Insatisfecho | 5: Muy Satisfecho"),
+    p("NS/NC: Registrado como valor 6")
+  ),
+  
+  div(style = "margin: 20px 0;",
+    h4("2022: Escala Expandida", style = "color: #16A085;"),
+    p("La escala se amplió a un rango de 1 a 10 para capturar matices adicionales:"),
+    p("1: Totalmente Insatisfecho | 10: Totalmente Satisfecho"),
+    p("NS/NC: Registrado como valor 99")
+  ),
+  
+  div(style = "margin: 20px 0;",
+    h4("2023: Formato Cualitativo", style = "color: #16A085;"),
+    p("Se introdujo una escala cualitativa con opciones específicas:"),
+    p("Muy Satisfecho | Satisfecho | Neutral | Insatisfecho | Muy Insatisfecho"),
+    p("Con opción adicional para NS/NC")
+  ),
+  
+  p(style = "margin-top: 20px;",
+    "Nuestro sistema maneja estas variaciones preservando la capacidad de realizar 
+    análisis comparativos significativos a través del tiempo, mientras mantiene la 
+    integridad de los datos originales.")
+)
+```
+
+
+## Comparación de Preguntas Entre Encuestas 
+
+La capacidad de rastrear la evolución de preguntas a través de múltiples años es fundamental para entender las tendencias en la percepción ciudadana. Estamos desarrollando un sistema sofisticado que identifica conexiones significativas entre preguntas similares, incluso cuando su formulación varía con el tiempo.
+
+```{r QComp-Panel}
+#| panel: fill
+fluidRow(
+  column(6,
+    div(style = "padding: 20px; margin-bottom: 20px;",
+      sliderInput("slider", "Sensibilidad de Detección:", 
+                  min = 0, max = 1, value = 0, step = 0.2)
+    ),
+    visNetworkOutput("simil_diagram", height = "500px")
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h3("Análisis Inteligente de Similitud", style = "color: #2C3E50;"),
+      p("Nuestro sistema emplea un enfoque híbrido que combina análisis computacional 
+        con validación experta. Este método nos permite identificar conexiones 
+        significativas entre preguntas que, aunque formuladas de manera diferente, 
+        buscan medir los mismos aspectos de la percepción ciudadana."),
+      
+      h4("Componentes del Sistema", style = "color: #16A085;"),
+      p("El proceso integra tres elementos clave:"),
+      tags$ul(
+        tags$li(strong("Análisis Textual Avanzado"), ": Algoritmos que detectan 
+                similitudes en la formulación de preguntas, considerando variaciones 
+                en el lenguaje y estructura."),
+        tags$li(strong("Validación por Expertos"), ": Revisión sistemática por 
+                especialistas que confirman las conexiones identificadas, aportando 
+                contexto y conocimiento histórico."),
+        tags$li(strong("Documentación Detallada"), ": Registro meticuloso de los 
+                cambios en la formulación de preguntas, preservando la trazabilidad 
+                de la evolución de cada indicador.")
+      ),
+      
+div(
+ style = "margin-top: 20px; padding: 15px; background-color: #ECF0F1; border-radius: 5px;",
+ h4("Interpretación del Coeficiente de Similitud", style = "color: #2C3E50;"),
+ p("El control deslizante ajusta el umbral de similitud entre preguntas:"),
+ tags$ul(
+   tags$li(strong("Coeficiente Bajo (0.0-0.2)"), ": Solo detecta preguntas prácticamente idénticas, genera falsos negativos"),
+   tags$li(strong("Coeficiente Medio (0.4-0.6)"), ": Identifica variaciones moderadas en la formulación"),
+   tags$li(strong("Coeficiente Alto (0.8-1.0)"), ": Conecta preguntas que podrían medir conceptos similares, genera falsos positivos")
+ ),
+ p("Una vez perfeccionada, esta herramienta nos permitirá balancear precisión y exhaustividad en la detección de preguntas relacionadas.")
+)
+    )
+  )
+)
+```
+
+
+```{r QComp-Server}
+#| context: server
+
+output$simil_diagram <- renderVisNetwork({
+  nodes <- data.frame(
+    id = 1:15,
+    label = c(
+      "¿Satisfacción Transporte?",
+      "¿Calidad Transporte?",
+      "¿Nivel Transporte?",
+      "¿Satisfacción Agua?",
+      "¿Calidad Agua?",
+      "¿Servicio Agua?",
+      "¿Seguridad Colonia?",
+      "¿Nivel Seguridad?",
+      "¿Percepción Seguridad?",
+      "¿Satisfacción Parques?",
+      "¿Estado Parques?",
+      "¿Calidad Parques?",
+      "¿Satisfacción Luz?",
+      "¿Servicio Luz?",
+      "¿Alumbrado Público?"
+    ),
+    group = rep(1:5, each = 3),
+    color = rep(theme_colors$primary, 15)
+  )
+  
+  # Create edges based on slider value
+  edges <- data.frame(from = numeric(0), to = numeric(0))
+  
+  # As coefficient increases, more connections are made
+  if (input$slider >= 0.2) {
+    # Connect only within groups
+    edges <- rbind(edges, data.frame(
+      from = c(1,2, 4,5, 7,8, 10,11, 13,14),
+      to = c(2,3, 5,6, 8,9, 11,12, 14,15)
+    ))
+  }
+  if (input$slider >= 0.6) {
+    # Connect across similar groups
+    edges <- rbind(edges, data.frame(
+      from = c(1,4, 7,10, 13,1),
+      to = c(4,7, 10,13, 1,13)
+    ))
+  }
+  if (input$slider >= 0.8) {
+    # Connect everything
+    edges <- expand.grid(from = 1:15, to = 1:15)
+    edges <- edges[edges$from < edges$to,]
+  }
+  
+  visNetwork(nodes, edges) %>%
+    visNodes(
+      font = list(color = theme_colors$text, size = 14),
+      borderWidth = 2,
+      shadow = TRUE
+    ) %>%
+    visEdges(
+      color = list(color = theme_colors$secondary, opacity = 0.8),
+      smooth = TRUE,  width =5
+    ) %>%
+    visLayout(randomSeed = 123) %>%
+    visPhysics(
+      stabilization = list(enabled = TRUE, iterations = 200),
+      solver = "forceAtlas2Based"
+    ) %>%
+    visOptions(highlightNearest = TRUE)
+})
+```
+
+```{r}
+#| panel: fill
+div(
+  style = "margin-top: 40px; padding: 25px; background-color: #ECF0F1; border-radius: 8px;",
+  h3("Desafíos y Soluciones en la Comparación de Preguntas", style = "color: #2C3E50;"),
+  
+  p("La evolución de nuestras encuestas presenta desafíos únicos que requieren 
+    soluciones sofisticadas. Algunos casos notables incluyen:"),
+  
+  div(style = "display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;",
+    div(
+      style = "padding: 15px; background-color: white; border-radius: 5px;",
+      h4("Variaciones Sutiles", style = "color: #16A085;"),
+      p("Preguntas que mantienen el mismo objetivo pero presentan cambios menores en su formulación:"),
+      tags$ul(
+        tags$li("2021: '¿Qué tan satisfecho está con el transporte público?'"),
+        tags$li("2022: '¿Cuál es su nivel de satisfacción con el sistema de transporte público?'"),
+        tags$li("2023: '¿Cómo calificaría el servicio de transporte público?'")
+      )
+    ),
+    div(
+      style = "padding: 15px; background-color: white; border-radius: 5px;",
+      h4("Evolución de Escalas", style = "color: #16A085;"),
+      p("Cambios en las escalas de medición que requieren normalización:"),
+      tags$ul(
+        tags$li("Transición de escalas numéricas a cualitativas"),
+        tags$li("Variaciones en el rango de las escalas (1-5 a 1-10)"),
+        tags$li("Modificaciones en las etiquetas de las opciones de respuesta")
+      )
+    )
+  ),
+  
+  p(style = "margin-top: 20px;",
+    "Nuestro sistema está en constante evolución, incorporando nuevos patrones 
+    y mejorando su capacidad de detección a medida que procesamos más datos históricos.")
+)
+```
+
+## Manejo de Preguntas Dependientes
+
+La gestión eficiente de preguntas interdependientes es crucial para mantener la integridad analítica de nuestras encuestas.
+
+
+```{r QDep-Panel}
+#| panel: fill
+fluidRow(
+  column(6,
+    grViz("
+digraph G {
+      graph [layout = dot, rankdir = LR]
+      
+      node [shape = rectangle, style = filled, fontname = 'Montserrat', fontsize = 12, color = '#2C3E50']
+      edge [color = '#2C3E50']
+
+      subgraph cluster_1 {
+        label = '';
+        color = 'white';
+        question1 [label = 'Pregunta Principal:\n¿Ha experimentado discriminación?', fillcolor = '#16A085', fontcolor = '#FFFFFF']
+        q1_op1 [label = 'Por género', fillcolor = '#ECF0F1']
+        q1_op2 [label = 'Por edad', fillcolor = '#ECF0F1']
+        q1_op3 [label = 'Por origen', fillcolor = '#ECF0F1']
+        q1_otro [label = 'Otro', fillcolor = '#F39C12']
+
+        question1 -> {q1_op1 q1_op2 q1_op3 q1_otro}
+      }
+
+      subgraph cluster_2 {
+        label = '';
+        color = 'white';
+        question2 [label = 'Pregunta Principal:\n¿Qué servicios utiliza?', fillcolor = '#16A085', fontcolor = '#FFFFFF']
+        q2_op1 [label = 'Transporte', fillcolor = '#ECF0F1']
+        q2_op2 [label = 'Salud', fillcolor = '#ECF0F1']
+        q2_op3 [label = 'Educación', fillcolor = '#ECF0F1']
+        q2_otro [label = 'Otro', fillcolor = '#F39C12']
+
+        question2 -> {q2_op1 q2_op2 q2_op3 q2_otro}
+      }
+
+      { rank = same; question1; question2}
+      question1 -> question2 [style = invis]
+    }")
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; font-size: 1.1em; line-height: 1.6;",
+      h3("Desafío de Preguntas 'Otro'", style = "color: #2C3E50;"),
+      p("Un desafío particular en nuestras encuestas es el manejo de la opción 'Otro', 
+        que aparece en múltiples preguntas pero requiere un tratamiento contextual específico."),
+      
+      h4("Implicaciones Analíticas", style = "color: #16A085;"),
+      tags$ul(
+        tags$li(strong("Contexto Específico"), ": Cada 'Otro' deriva significado de su pregunta principal"),
+        tags$li(strong("Validación Cruzada"), ": Requiere verificación contra respuestas relacionadas"),
+        tags$li(strong("Trazabilidad"), ": Mantiene conexión con la pregunta origen para análisis precisos")
+      )
+      
+      
+    )
+  )
+)
+```
+```{r}
+#| panel: fill
+div(
+        style = "margin-top: 20px; padding: 15px; background-color: #ECF0F1; border-radius: 5px;",
+        h4("Solución Implementada", style = "color: #2C3E50;"),
+        p("Nuestro sistema:"),
+        tags$ul(
+          tags$li("Preserva el contexto específico de cada respuesta 'Otro'"),
+          tags$li("Facilita análisis comparativos manteniendo relaciones jerárquicas"),
+          tags$li("Permite la evolución de categorías basada en respuestas frecuentes")
+        )
+      )
+```
+
+## Desarrollo del Dashboard AEJ
+```{r}
+#| panel: fill
+fluidRow(
+  div(
+    style = "padding: 20px; font-size: 1.1em; line-height: 1.6; margin-bottom: 30px;",
+    p("Seleccionamos Shiny-R para el desarrollo de nuestro dashboard por sus capacidades analíticas avanzadas, 
+      control total sobre el código y perfecta integración con nuestros procesos existentes de análisis de datos. 
+      Esta decisión estratégica nos permite maximizar nuestra inversión en desarrollo mientras mantenemos costos operativos mínimos.")
+  )
+)
+```
+
+
+### Comparación de Bibliotecas de Visualización
+
+```{r LibComp-Panel}
+#| panel: fill
+
+fluidRow(
+  div(
+    style = "padding: 20px; background-color: #ECF0F1; border-radius: 5px; margin-bottom: 30px;",
+    h4("Criterios de Selección", style = "color: #2C3E50;"),
+    tags$ul(
+      tags$li(strong("Rendimiento"), ": Capacidad para manejar grandes volúmenes de datos"),
+      tags$li(strong("Personalización"), ": Flexibilidad para adaptar visualizaciones"),
+      tags$li(strong("Interactividad"), ": Capacidades de exploración dinámica"),
+      tags$li(strong("Presupuesto"), ": Optimización de costos en licencias y software")
+    )
+  )
+)
+
+fluidRow(
+  column(3,
+    div(
+      style = "padding: 15px;",
+      selectInput("chart_type", "Tipo de Gráfica:",
+                choices = c("Barras" = "bar",
+                           "Líneas" = "line",
+                           "Dispersión" = "scatter")),
+      selectInput("library", "Biblioteca:",
+                choices = c("ggplot2", "plotly", "highcharter"))
+    )
+  ),
+  column(9,
+    div(
+      style = "padding: 15px;",
+      uiOutput("viz_container"),
+      uiOutput("library_info")
+    )
+  )
+)
+
+div(
+  style = "margin-top: 40px; padding: 25px; background-color: #ECF0F1; border-radius: 8px;",
+  h3("Retos Pendientes 2025", style = "color: #2C3E50;"),
+  
+  tags$ul(
+    tags$li(strong("Escala"), ": Implementación de más de 200 preguntas con visualizaciones específicas"),
+    tags$li(strong("Rendimiento"), ": Optimización para 200 usuarios concurrentes durante la presentación del informe"),
+    tags$li(strong("Integración"), ": Conexión fluida con la nueva infraestructura de base de datos")
+  )
+)
+```
+
+```{r LibComp-Server}
+#| context: server
+
+# Create sample data
+satisfaction_data <- data.frame(
+  year = rep(2019:2024, each = 3),
+  category = rep(c("Servicios", "Seguridad", "Transporte"), times = 6),
+  satisfaction = runif(18, 5, 9),
+  responses = round(runif(18, 100, 1000))
+)
+create_ggplot <- function(data, type) {
+  base_theme <- theme_minimal() +
+    theme(
+      text = element_text(family = "Montserrat", color = theme_colors$primary),
+      plot.title = element_text(size = 14, face = "bold", color = theme_colors$primary),
+      axis.title = element_text(size = 12, color = theme_colors$primary),
+      axis.text = element_text(size = 10, color = theme_colors$primary),
+      panel.grid.major = element_line(color = theme_colors$grid, linewidth = 0.2),
+      panel.grid.minor = element_line(color = theme_colors$grid, linewidth = 0.1),
+      legend.position = "none"  # Ensure legend is removed at theme level
+    )
+  
+  colors <- c(theme_colors$primary, theme_colors$secondary, theme_colors$accent)
+  
+  if(type == "bar") {
+    ggplot(data, aes(x = category, y = satisfaction)) +
+      geom_col(aes(fill = category), show.legend = FALSE) +  # Explicitly set show.legend = FALSE
+      scale_fill_manual(values = colors, guide = "none") +   # Use guide = "none" in scale
+      labs(title = "Niveles de Satisfacción por Categoria",
+           x = "Categoría",
+           y = "Satisfacción") +
+      base_theme +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  } else if(type == "line") {
+    ggplot(data, aes(x = year, y = satisfaction)) +
+      geom_line(aes(color = category, group = category), size = 1, show.legend = FALSE) +
+      geom_point(aes(color = category), size = 3, show.legend = FALSE) +
+      scale_color_manual(values = colors, guide = "none") +
+      labs(title = "Tendencias de Satisfacción",
+           x = "Año",
+           y = "Satisfacción") +
+      base_theme
+  } else {  # scatter
+    ggplot(data, aes(x = satisfaction, y = responses)) +
+      geom_point(aes(color = category, size = responses), show.legend = FALSE) +
+      scale_color_manual(values = colors, guide = "none") +
+      scale_size_continuous(range = c(3, 10), guide = "none") +
+      labs(title = "Satisfacción vs Respuestas",
+           x = "Satisfacción",
+           y = "Número de Respuestas") +
+      base_theme
+  }
+}
+# Updated Plotly visualization function
+create_plotly_viz <- function(data, type) {
+  base_layout <- list(
+    font = list(
+      family = "Montserrat",
+      color = theme_colors$primary
+    ),
+    paper_bgcolor = "transparent",
+    plot_bgcolor = "transparent",
+    margin = list(t = 50, r = 50, b = 50, l = 50),
+    xaxis = list(
+      title = list(
+        font = list(size = 12, color = theme_colors$primary)
+      ),
+      gridcolor = theme_colors$grid,
+      linecolor = theme_colors$primary,
+      zeroline = FALSE
+    ),
+    yaxis = list(
+      title = list(
+        font = list(size = 12, color = theme_colors$primary)
+      ),
+      gridcolor = theme_colors$grid,
+      linecolor = theme_colors$primary,
+      zeroline = FALSE
+    ),
+    showlegend = TRUE,
+    legend = list(
+      font = list(
+        size = 10,
+        color = theme_colors$primary
+      )
+    )
+  )
+
+  if(type == "bar") {
+    plot_ly(data, 
+            x = ~category, 
+            y = ~satisfaction, 
+            color = ~category,
+            colors = c(theme_colors$primary, theme_colors$secondary, theme_colors$accent),
+            type = 'bar') %>%
+      layout(
+        title = list(
+          text = "Niveles de Satisfacción por Categoría",
+          font = list(size = 14, color = theme_colors$primary)
+        ),
+        xaxis = list(title = "Categoría"),
+        yaxis = list(title = "Satisfacción"),
+        base_layout
+      )
+  } else if(type == "line") {
+    plot_ly(data, 
+            x = ~year, 
+            y = ~satisfaction, 
+            color = ~category,
+            colors = c(theme_colors$primary, theme_colors$secondary, theme_colors$accent),
+            type = 'scatter',
+            mode = 'lines+markers',
+            line = list(width = 2),
+            marker = list(size = 8)) %>%
+      layout(
+        title = list(
+          text = "Tendencias de Satisfacción",
+          font = list(size = 14, color = theme_colors$primary)
+        ),
+        xaxis = list(title = "Año"),
+        yaxis = list(title = "Satisfacción"),
+        base_layout
+      )
+  } else {  # scatter
+    plot_ly(data, 
+            x = ~satisfaction, 
+            y = ~responses, 
+            color = ~category,
+            colors = c(theme_colors$primary, theme_colors$secondary, theme_colors$accent),
+            size = ~responses,
+            sizes = c(10, 50),
+            type = 'scatter',
+            mode = 'markers') %>%
+      layout(
+        title = list(
+          text = "Satisfacción vs Respuestas",
+          font = list(size = 14, color = theme_colors$primary)
+        ),
+        xaxis = list(title = "Satisfacción"),
+        yaxis = list(title = "Número de Respuestas"),
+        base_layout
+      )
+  }
+}
+
+# Helper function for highcharter visualizations
+create_ggplot <- function(data, type) {
+
+  base_plot <- ggplot(data) +  theme_custom()
+  
+  colors <- c(theme_colors$primary, theme_colors$secondary, theme_colors$accent)
+  
+  if(type == "bar") {
+    base_plot +
+      geom_col(aes(x = category, y = satisfaction, fill = category)) +
+      scale_fill_manual(values = colors) +
+      labs(title = "Niveles de Satisfacción por Categoría",
+           x = "Categoría",
+           y = "Satisfacción") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  } else if(type == "line") {
+    base_plot +
+      geom_line(aes(x = year, y = satisfaction, color = category, group = category),
+                size = 1) +
+      geom_point(aes(x = year, y = satisfaction, color = category), size = 3) +
+      scale_color_manual(values = colors) +
+      labs(title = "Tendencias de Satisfacción",
+           x = "Año",
+           y = "Satisfacción")
+  } else {  # scatter
+    base_plot +
+      geom_point(aes(x = satisfaction, y = responses, color = category, size = responses)) +
+      scale_color_manual(values = colors) +
+      scale_size_continuous(range = c(3, 10)) +
+      labs(title = "Satisfacción vs Respuestas",
+           x = "Satisfacción",
+           y = "Número de Respuestas")
+  }
+}
+
+# Updated Plotly visualization function
+create_plotly_viz <- function(data, type) {
+  base_layout <- list(
+    font = list(
+      family = "Montserrat",
+      color = theme_colors$primary
+    ),
+    paper_bgcolor = "transparent",
+    plot_bgcolor = "transparent",
+    margin = list(t = 50, r = 50, b = 50, l = 50),
+    xaxis = list(
+      title = list(
+        font = list(size = 12, color = theme_colors$primary)
+      ),
+      gridcolor = theme_colors$grid,
+      linecolor = theme_colors$primary,
+      zeroline = FALSE
+    ),
+    yaxis = list(
+      title = list(
+        font = list(size = 12, color = theme_colors$primary)
+      ),
+      gridcolor = theme_colors$grid,
+      linecolor = theme_colors$primary,
+      zeroline = FALSE
+    ),
+    showlegend = TRUE,
+    legend = list(
+      font = list(
+        size = 10,
+        color = theme_colors$primary
+      )
+    )
+  )
+
+  if(type == "bar") {
+    plot_ly(data, 
+            x = ~category, 
+            y = ~satisfaction, 
+            color = ~category,
+            colors = c(theme_colors$primary, theme_colors$secondary, theme_colors$accent),
+            type = 'bar',
+            hoverinfo = "text",
+            text = ~paste("Categoría:", category, "<br>Satisfacción:", round(satisfaction, 1))) %>%
+      layout(
+        title = list(
+          text = "Niveles de Satisfacción por Categoría",
+          font = list(size = 14, color = theme_colors$primary)
+        ),
+        xaxis = list(title = "Categoría"),
+        yaxis = list(title = "Satisfacción"),
+        showlegend = TRUE,
+        barmode = 'stack',  # Change this to 'group' if you want separated bars
+        bargap = 0.2,       # Adjust gap between bars
+        uniformtext = list(minsize = 8, mode = 'hide'),
+        base_layout
+      )
+} else if(type == "line") {
+    plot_ly(data, 
+            x = ~year, 
+            y = ~satisfaction, 
+            color = ~category,
+            colors = c(theme_colors$primary, theme_colors$secondary, theme_colors$accent),
+            type = 'scatter',
+            mode = 'lines+markers',
+            line = list(width = 2),
+            marker = list(size = 8)) %>%
+      layout(
+        title = list(
+          text = "Tendencias de Satisfacción",
+          font = list(size = 14, color = theme_colors$primary)
+        ),
+        xaxis = list(title = "Año"),
+        yaxis = list(title = "Satisfacción"),
+        base_layout
+      )
+  } else {  # scatter
+    plot_ly(data, 
+            x = ~satisfaction, 
+            y = ~responses, 
+            color = ~category,
+            colors = c(theme_colors$primary, theme_colors$secondary, theme_colors$accent),
+            size = ~responses,
+            sizes = c(10, 50),
+            type = 'scatter',
+            mode = 'markers') %>%
+      layout(
+        title = list(
+          text = "Satisfacción vs Respuestas",
+          font = list(size = 14, color = theme_colors$primary)
+        ),
+        xaxis = list(title = "Satisfacción"),
+        yaxis = list(title = "Número de Respuestas"),
+        base_layout
+      )
+  }
+}
+create_highchart <- function(data, type) {
+  # Common theme settings
+  hc_theme_custom <- hc_theme(
+    colors = c(theme_colors$primary, theme_colors$secondary, theme_colors$accent),
+    chart = list(
+      backgroundColor = "transparent",
+      style = list(fontFamily = "Montserrat")
+    ),
+    title = list(
+      style = list(
+        color = theme_colors$primary,
+        fontWeight = "bold"
+      )
+    ),
+    subtitle = list(
+      style = list(color = theme_colors$primary)
+    ),
+    legend = list(
+      itemStyle = list(color = theme_colors$primary),
+      itemHoverStyle = list(color = theme_colors$secondary)
+    ),
+    xAxis = list(
+      gridLineColor = theme_colors$grid,
+      lineColor = theme_colors$primary,
+      labels = list(style = list(color = theme_colors$primary))
+    ),
+    yAxis = list(
+      gridLineColor = theme_colors$grid,
+      lineColor = theme_colors$primary,
+      labels = list(style = list(color = theme_colors$primary))
+    )
+  )
+
+  if(type == "bar") {
+    sum_data <- data %>% 
+      group_by(category) %>% 
+      summarise(mean_satisfaction = mean(satisfaction))
+    
+    hchart(sum_data, "column", 
+           hcaes(x = category, y = mean_satisfaction, group = category)) %>%
+      hc_title(text = "Niveles de Satisfacción por Categoría") %>%
+      hc_xAxis(title = list(text = "Categoría")) %>%
+      hc_yAxis(title = list(text = "Satisfacción")) %>%
+      hc_add_theme(hc_theme_custom) %>%
+      hc_tooltip(
+        backgroundColor = "rgba(247,247,247,0.95)",
+        style = list(color = theme_colors$primary)
+      )
+  } else if(type == "line") {
+    hchart(data, "line",
+           hcaes(x = year, y = satisfaction, group = category)) %>%
+      hc_title(text = "Tendencias de Satisfacción") %>%
+      hc_xAxis(title = list(text = "Año")) %>%
+      hc_yAxis(title = list(text = "Satisfacción")) %>%
+      hc_add_theme(hc_theme_custom) %>%
+      hc_tooltip(
+        backgroundColor = "rgba(247,247,247,0.95)",
+        style = list(color = theme_colors$primary)
+      )
+  } else {  # scatter
+    hchart(data, "scatter",
+           hcaes(x = satisfaction, y = responses, group = category, size = responses)) %>%
+      hc_title(text = "Satisfacción vs Respuestas") %>%
+      hc_xAxis(title = list(text = "Satisfacción")) %>%
+      hc_yAxis(title = list(text = "Número de Respuestas")) %>%
+      hc_add_theme(hc_theme_custom) %>%
+      hc_tooltip(
+        backgroundColor = "rgba(247,247,247,0.95)",
+        style = list(color = theme_colors$primary)
+      ) %>%
+      hc_plotOptions(
+        scatter = list(
+          marker = list(
+            radius = 4,
+            symbol = "circle"
+          )
+        )
+      )
+  }
+}
+# Main render function
+output$viz_container <- renderUI({
+  switch(input$library,
+    "ggplot2" = plotOutput("ggplot_viz", height = "500px"),
+    "plotly" = plotlyOutput("plotly_viz", height = "500px"),
+    "highcharter" = highchartOutput("highchart_viz", height = "500px")
+  )
+})
+
+# Individual renders for each library type
+output$ggplot_viz <- renderPlot({
+  create_ggplot(satisfaction_data, input$chart_type)
+})
+
+output$plotly_viz <- renderPlotly({
+  create_plotly_viz(satisfaction_data, input$chart_type)
+})
+
+output$highchart_viz <- renderHighchart({
+  create_highchart(satisfaction_data, input$chart_type)
+})
+
+# Library information
+output$library_info <- renderUI({
+  info_text <- switch(input$library,
+    "ggplot2" = "ggplot2 destaca por su sistema de gráficos declarativo y su alta calidad de visualizaciones estáticas. Ideal para publicaciones y reportes.",
+    "plotly" = "Plotly es nuestra elección principal por su excelente balance entre capacidades interactivas y costo, siendo una solución de código abierto.",
+    "highcharter" = "Highcharter ofrece capacidades avanzadas de visualización, pero su modelo de licenciamiento comercial excede nuestro presupuesto actual. Se mantiene como opción para futuras expansiones del proyecto."
+  )
+  
+  div(
+    style = "margin-top: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 5px;",
+    h4(paste("Biblioteca:", input$library)),
+    p(info_text),
+    if(input$library == "highcharter") {
+      div(
+        style = "margin-top: 10px; padding: 10px; background-color: #FFF3CD; border-left: 4px solid #F39C12; border-radius: 4px;",
+        p("Nota: La implementación de Highcharter requeriría una inversión adicional en licencias comerciales.")
+      )
+    }
+  )
+})
+```
+#### Decisión final de biblioteca gráfica:
+```{r}
+#| panel: fill
+ div(
+   style = "padding: 20px; font-size: 1.1em; line-height: 1.6; margin-bottom: 30px;",
+   p("Seleccionamos Shiny-R con Plotly como nuestra solución principal para el desarrollo del dashboard. 
+     Esta decisión estratégica nos permite maximizar nuestras capacidades analíticas mientras mantenemos 
+     los costos operativos al mínimo, especialmente considerando que Highcharter, aunque poderoso, 
+     requería una inversión significativa en licencias que excedía nuestro presupuesto actual.")
+ )
+
+```
+
+
+### Retos pendientes para el Dashboard de este año
+
+A pesar de las ventajas de Shiny-R, aún enfrentamos varios retos importantes en el desarrollo del dashboard para este año. El principal desafío es la implementación de más de 200 preguntas, cada una con diferentes visualizaciones. Estamos trabajando diligentemente para garantizar que todas las visualizaciones sean claras y útiles.
+
+Además, en preparación para la presentación del informe Así Estamos Juárez, estimamos que el mayor pico de estrés del dashboard será durante la presentación, estimando un máximo de 200 usuarios concurrentes. Nos estamos enfocando en optimizar el rendimiento y la capacidad de respuesta del dashboard para asegurar una experiencia fluida y eficiente para todos los usuarios. Continuamos desarrollando estas soluciones internamente para superar estos desafíos.
+
+
+# Direcciones Futuras
+
+## Productos planeados a corto plazo
+
+### Análisis de Texto 
+```{r}
+#| panel: fill
+fluidRow(
+  column(12,
+    div(
+      style = "padding: 20px; background-color: #ECF0F1; border-radius: 8px; margin-bottom: 20px;",
+      h3("Análisis Textual de Respuestas Abiertas", style = "color: #2C3E50; margin-bottom: 15px;"),
+      p("Este módulo procesa y analiza las respuestas abiertas de las encuestas, 
+        identificando patrones y tendencias en la opinión ciudadana.", 
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;")
+    )
+  ),
+  column(3,
+    div(
+      style = "padding: 15px; background-color: white; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      selectInput("text_analysis", "Tipo de Análisis:",
+                 choices = c("Frecuencia de Palabras" = "frequency",
+                           "Temas Principales" = "topics",
+                           "Análisis de Sentimiento" = "sentiment",
+                           "Relaciones" = "relationships"),
+                 selected = "frequency")
+    )
+  ),
+  column(9,
+    div(
+      style = "padding: 15px; background-color: white; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      uiOutput("text_viz_container")
+    )
+  )
+)
+```
+
+```{r}
+#| context: server
+
+# Sample response data
+sample_responses <- c(
+  "necesitamos más seguridad en las calles",
+  "mejorar el transporte público",
+  "faltan espacios verdes y parques",
+  "mayor seguridad en el transporte",
+  "mejorar servicios públicos",
+  "problemas con el agua",
+  "inseguridad en la noche",
+  "falta de mantenimiento en parques",
+  "transporte público deficiente",
+  "problemas de agua en la colonia",
+  "las calles están en mal estado",
+  "falta iluminación en la zona",
+  "mucha basura en las calles",
+  "servicio de agua irregular",
+  "pocas áreas verdes"
+)
+
+# Helper function for word frequency visualization
+create_frequency_viz <- function() {
+  # Extended Spanish stop words
+  extended_stop_words <- c(
+    stop_words_es,
+    "en", "de", "con",  # Prepositions
+    "la", "el", "las", "los", "lo",  # Articles
+    "y", "o", "u", "e",  # Conjunctions
+    "este", "esta", "estos", "estas",  # Demonstratives
+    "ese", "esa", "esos", "esas",
+    "aquel", "aquella", "aquellos", "aquellas",
+    "mi", "tu", "su", "nuestro", "vuestro",  # Possessives
+    "más", "menos", "muy", "mucho", "poco",  # Quantifiers
+    "del", "al", "me", "se", "te",  # Common contractions
+    "hay", "ser", "estar", "tener", "hacer",  # Common verbs
+    "que", "cual", "quien", "donde", "cuando", "como",  # Relative pronouns
+    "por", "para", "sin", "sobre", "entre", "hacia",  # More prepositions
+    "a", "ante", "bajo", "cabe", "desde", "durante", "hasta",
+    "mediante", "tras", "versus", "vía"
+  )
+  
+  # Process text and create word frequency dataframe
+  words_df <- tibble(text = sample_responses) %>%
+    unnest_tokens(word, text) %>%
+    filter(!word %in% extended_stop_words) %>%  # Using filter instead of anti_join
+    count(word, sort = TRUE) %>%
+    head(8) %>%
+    mutate(word = reorder(word, n))
+  
+  # Create Plotly visualization
+  plot_ly(words_df,
+          x = ~n,
+          y = ~word,
+          type = "bar",
+          orientation = 'h',
+          marker = list(
+            color = theme_colors$primary,
+            line = list(color = theme_colors$primary, width = 1.5)
+          )) %>%
+    layout(
+      title = list(
+        text = "Palabras más Frecuentes en Respuestas Abiertas",
+        font = list(family = "Montserrat", size = 16, color = theme_colors$primary)
+      ),
+      xaxis = list(
+        title = "Frecuencia",
+        gridcolor = theme_colors$grid,
+        zerolinecolor = theme_colors$grid
+      ),
+      yaxis = list(
+        title = "",
+        gridcolor = theme_colors$grid
+      ),
+      showlegend = FALSE,
+      paper_bgcolor = "rgba(0,0,0,0)",
+      plot_bgcolor = "rgba(0,0,0,0)",
+      margin = list(l = 120),
+      font = list(family = "Montserrat")
+    )
+}
+
+# Helper function for topic modeling visualization
+create_topics_viz <- function() {
+  # Sample topic data
+  topics_data <- data.frame(
+    tema = rep(c("Seguridad", "Transporte", "Servicios", "Infraestructura"), each = 3),
+    palabra = c(
+      "seguridad", "policía", "vigilancia",
+      "transporte", "camión", "rutas",
+      "agua", "luz", "basura",
+      "calles", "parques", "pavimento"
+    ),
+    peso = c(
+      0.8, 0.6, 0.4,
+      0.7, 0.5, 0.3,
+      0.9, 0.7, 0.5,
+      0.6, 0.4, 0.3
+    )
+  )
+  
+  # Create Plotly visualization
+  plot_ly(topics_data,
+          x = ~tema,
+          y = ~peso,
+          color = ~tema,
+          colors = c(theme_colors$primary, theme_colors$secondary, 
+                    theme_colors$accent, adjustcolor(theme_colors$primary, 0.7)),
+          type = "scatter",
+          mode = "markers",
+          size = ~peso * 50,
+          text = ~paste0(
+            "<b>", palabra, "</b><br>",
+            "Tema: ", tema, "<br>",
+            "Peso: ", round(peso, 2)
+          ),
+          hoverinfo = "text") %>%
+    layout(
+      title = list(
+        text = "Agrupación de Temas Principales",
+        font = list(family = "Montserrat", size = 16, color = theme_colors$primary)
+      ),
+      xaxis = list(
+        title = "Tema",
+        showgrid = FALSE,
+        font = list(family = "Montserrat")
+      ),
+      yaxis = list(
+        title = "Relevancia",
+        showgrid = TRUE,
+        gridcolor = theme_colors$grid,
+        font = list(family = "Montserrat")
+      ),
+      showlegend = FALSE,
+      paper_bgcolor = "rgba(0,0,0,0)",
+      plot_bgcolor = "rgba(0,0,0,0)"
+    )
+}
+
+# Helper function for sentiment analysis visualization
+create_sentiment_viz <- function() {
+  # Sample sentiment data
+  sentiment_data <- data.frame(
+    categoria = c("Seguridad", "Transporte", "Servicios", "Infraestructura"),
+    Positivo = c(30, 25, 40, 35),
+    Negativo = c(70, 75, 60, 65)
+  )
+  
+  # Transform to long format
+  sentiment_long <- tidyr::gather(sentiment_data, 
+                                sentimiento, valor, 
+                                Positivo:Negativo, 
+                                factor_key = TRUE)
+  
+  # Create Plotly visualization
+  plot_ly(sentiment_long,
+          x = ~categoria,
+          y = ~valor,
+          color = ~sentimiento,
+          colors = c(theme_colors$secondary, theme_colors$accent),
+          type = "bar") %>%
+    layout(
+      title = list(
+        text = "Análisis de Sentimiento por Categoría",
+        font = list(family = "Montserrat", size = 16, color = theme_colors$primary)
+      ),
+      xaxis = list(
+        title = "Categoría",
+        font = list(family = "Montserrat")
+      ),
+      yaxis = list(
+        title = "Porcentaje",
+        range = c(0, 100),
+        font = list(family = "Montserrat")
+      ),
+      barmode = "stack",
+      paper_bgcolor = "rgba(0,0,0,0)",
+      plot_bgcolor = "rgba(0,0,0,0)"
+      )
+}
+
+# Helper function for relationships visualization
+create_relationships_viz <- function() {
+  # Create nodes
+  nodes <- data.frame(
+    id = 1:8,
+    label = c("Seguridad", "Transporte", "Servicios", "Infraestructura",
+              "Policía", "Rutas", "Agua", "Parques"),
+    group = c(rep("Categoría", 4), rep("Subcategoría", 4)),
+    color = c(rep(theme_colors$primary, 4), 
+              rep(theme_colors$secondary, 4))
+  )
+  
+  # Create edges
+  edges <- data.frame(
+    from = c(1,1,2,2,3,3,4,4),
+    to = c(5,5,6,6,7,7,8,8),
+    value = c(1,2,1,2,1,2,1,2),
+    color = theme_colors$grid
+  )
+  
+  # Create visNetwork visualization
+  visNetwork(nodes, edges) %>%
+    visPhysics(solver = "forceAtlas2Based") %>%
+    visOptions(
+      highlightNearest = TRUE
+    ) %>%
+    visLayout(randomSeed = 123) %>%
+    addFontAwesome() %>%
+    visInteraction(dragNodes = TRUE, dragView = TRUE, zoomView = TRUE) 
+}
+
+# Main render function for the visualization container
+output$text_viz_container <- renderUI({
+  switch(input$text_analysis,
+         "frequency" = plotlyOutput("frequency_plot", height = "500px"),
+         "topics" = plotlyOutput("topics_plot", height = "500px"),
+         "sentiment" = plotlyOutput("sentiment_plot", height = "500px"),
+         "relationships" = visNetworkOutput("relationships_plot", height = "500px")
+  )
+})
+
+# Individual visualization renders
+output$frequency_plot <- renderPlotly({
+  create_frequency_viz()
+})
+
+output$topics_plot <- renderPlotly({
+  create_topics_viz()
+})
+
+output$sentiment_plot <- renderPlotly({
+  create_sentiment_viz()
+})
+
+output$relationships_plot <- renderVisNetwork({
+  create_relationships_viz()
+})
+
+# Information text based on selection
+output$text_info <- renderUI({
+  info_text <- switch(input$text_analysis,
+    "frequency" = "El análisis de frecuencia revela los términos más comunes en las respuestas, 
+                  identificando las principales preocupaciones ciudadanas.",
+    "topics" = "La agrupación por temas muestra los principales conceptos y su interrelación, 
+                permitiendo entender patrones en las respuestas.",
+    "sentiment" = "El análisis de sentimiento evalúa la valencia emocional de las respuestas, 
+                   identificando áreas de satisfacción e insatisfacción.",
+    "relationships" = "La visualización de relaciones muestra cómo diferentes temas y conceptos 
+                      se conectan en el discurso ciudadano."
+  )
+  
+  div(
+    style = paste0(
+      "margin-top: 20px; padding: 15px; ",
+      "background-color: ", theme_colors$background, "; ",
+      "border-radius: 5px; ",
+      "font-family: Montserrat;"
+    ),
+    h4("Interpretación del Análisis", 
+       style = paste0("color: ", theme_colors$primary, ";")),
+    p(info_text),
+    tags$small(
+      style = "color: #666;",
+      "Los resultados se basan en el análisis de las respuestas abiertas de la encuesta."
+    )
+  )
+})
+```
+
+
+### Informe 'Vivo' Así Estamos Juárez
+Considero el desarrollo de un informe interactivo en lugar de un dashboard para el año 2026. Este documento interactivo sería una referencia de cómo se vería el producto final.
+
+### Automatización de Información Web Disponible
+Desarrollaré scripts para que el área de estudios pueda descargar datos de frecuencia consistente de fuentes como INEGI e IMSS. Esto solo es viable en secciones limitadas y no en plataformas de transparencia.
+
+### Desarrollo de MEL (IA) Experta en la Ciudad
+
+```{=html}
+<!-- Incluimos la biblioteca Typed.js -->
+<script src="https://cdn.jsdelivr.net/npm/typed.js@2.0.12"></script>
+
+<!-- Estilos personalizados -->
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400&display=swap');
+  
+  /* Estilo para el efecto de tipeo */
+  #typed-text.typing-effect {
+    font-family: 'Fira Code', monospace;
+    color: #2E86C1;
+    overflow: hidden;
+    white-space: pre-wrap;
+    border-right: .15em solid #2E86C1;
+    letter-spacing: .05em;
+    display: inline-block;
+    vertical-align: top;
+    width: 48%;
+  }
+  
+  /* Estilo para el texto adicional */
+  #additional-text {
+    display: inline-block;
+    vertical-align: top;
+    width: 48%;
+    padding: 20px;
+    font-size: 1.1em;
+    line-height: 1.6;
+    font-family: 'system-ui', monospace;
+  }
+</style>
+
+<!-- Contenedor del texto animado y el texto adicional -->
+<div id="typed-text" class="typing-effect"></div>
+<div id="additional-text">
+  Planeo desarrollar un sub-modelo extenso de lenguaje que utilice la información almacenada para proveer información limitada. Aplicaciones potenciales incluyen la elaboración de informes limitados y chatbots conversacionales. Esto es viable posterior a la construcción de la base de datos, con recursos computacionales y licencias de Microsoft.
+</div>
+
+<!-- Script para la animación y el Intersection Observer -->
+<script>
+  // Función para inicializar la animación de tipeo
+  function initTyping() {
+    var typed = new Typed('#typed-text', {
+      strings: [
+        `<h3>Análisis de la Percepción Ciudadana de los Servicios Públicos en Juárez</h3>
+        <p>El siguiente informe presenta un análisis detallado de la percepción ciudadana de los servicios públicos en la ciudad de Juárez, utilizando datos recogidos a través de encuestas realizadas en los distritos del 2 al 10. Los promedios de satisfacción se expresan en una escala del 1 al 10, donde 1 indica muy insatisfecho y 10 indica muy satisfecho:</p>
+          <li><strong>Distrito 2: </strong> En el Distrito 2, la satisfacción con los servicios públicos muestra un promedio de 5.8, indicando una percepción moderadamente baja. Los principales problemas reportados incluyen el alumbrado público y la recolección de basura.</li>
+`
+      ],
+      typeSpeed: 40,
+      backSpeed: 0,
+      loop: true,
+      showCursor: false,
+      cursorChar: '|',
+      contentType: 'html',
+    });
+  }
+
+  // Configuración del Intersection Observer
+  document.addEventListener("DOMContentLoaded", function() {
+    var options = {
+      root: null,
+      rootMargin: '0px',
+      threshold: 0.1
+    }
+
+    var observer = new IntersectionObserver(function(entries, observer) {
+      entries.forEach(function(entry) {
+        if(entry.isIntersecting) {
+          initTyping();
+          observer.unobserve(entry.target); // Deja de observar después de iniciar la animación
+        }
+      });
+    }, options);
+
+    observer.observe(document.querySelector('#typed-text'));
+  });
+</script>
+```
+## Proyectos a largo plazo
+
+```{r}
+#| panel: fill
+fluidRow(
+  column(6,      
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      highchartOutput("historical_chart")
+    )
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; background-color: #ECF0F1; border-radius: 8px;",
+      h3("Análisis Histórico Integral", style = "color: #2C3E50; margin-bottom: 15px;"),
+      p("El primer proyecto posterior a la construcción de la base de datos es realizar un análisis histórico de todas las encuestas del 'Así Estamos Juárez'. Este análisis nos permitirá:", 
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;"),
+      tags$ul(
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+        tags$li("Identificar tendencias a largo plazo en la percepción ciudadana"),
+        tags$li("Evaluar el impacto de políticas públicas y programas sociales"),
+        tags$li("Documentar la evolución de las preocupaciones ciudadanas"),
+        tags$li("Crear uno de los reportes históricos más completos sobre la ciudad")
+      )
+    )
+  ) 
+)
+```
+
+```{r}
+#| context: server
+
+output$historical_chart <- renderHighchart({
+  hc <- highchart() %>%
+    hc_title(
+      text = "Satisfacción con el Transporte Público en Juárez",
+      style = list(color = theme_colors$primary, fontSize = "16px")
+    ) %>%
+    hc_subtitle(
+      text = "Por distrito (2015-2024)",
+      style = list(color = theme_colors$primary)
+    ) %>%
+    hc_xAxis(
+      categories = data$year,
+      title = list(text = "Año"),
+      labels = list(style = list(color = theme_colors$text))
+    ) %>%
+    hc_yAxis(
+      title = list(text = "Nivel de Satisfacción"),
+      min = 0,
+      max = 10,
+      labels = list(style = list(color = theme_colors$text))
+    ) %>%
+    hc_tooltip(
+      shared = TRUE,
+      crosshairs = TRUE,
+      backgroundColor = "rgba(255, 255, 255, 0.9)",
+      style = list(color = theme_colors$text)
+    )
+    
+  # Add series with our theme colors
+  districts <- unique(data$district)
+  colors <- c(theme_colors$primary, theme_colors$secondary, 
+              theme_colors$accent, adjustcolor(theme_colors$primary, 0.7))
+  
+  for(i in seq_along(districts)) {
+    district_data <- data %>% filter(district == districts[i])
+    hc <- hc %>% hc_add_series(
+      name = districts[i],
+      data = district_data$satisfaction,
+      color = colors[i],
+      marker = list(radius = 4)
+    )
+  }
+  
+  hc %>%
+    hc_legend(
+      itemStyle = list(color = theme_colors$text),
+      backgroundColor = "transparent"
+    ) %>%
+    hc_chart(
+      backgroundColor = "transparent",
+      style = list(fontFamily = "Montserrat")
+    ) %>%
+    hc_plotOptions(
+      series = list(
+        lineWidth = 2,
+        animation = list(duration = 1000),
+        states = list(
+          hover = list(lineWidth = 3)
+        )
+      )
+    )
+})
+```
+
+### Rediseño Estratégico de Encuestas
+
+El siguiente proyecto implica una renovación integral de las encuestas aplicadas en el 'Así Estamos Juárez', con énfasis especial en salud mental y economía conductual.
+
+```{r}
+#| panel: fill
+fluidRow(
+  column(4,
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); height: 100%;",
+      h4("Prerequisitos", style = "color: #16A085; margin-bottom: 15px;"),
+      tags$ul(
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+        tags$li("Completar base de datos histórica"),
+        tags$li("Finalizar análisis histórico"),
+        tags$li("Validar metodologías existentes")
+      )
+    )
+  ),
+  column(4,
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); height: 100%;",
+      h4("Recursos Necesarios", style = "color: #16A085; margin-bottom: 15px;"),
+      tags$ul(
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+        tags$li("Presupuesto para pruebas piloto"),
+        tags$li("Equipo multidisciplinario"),
+        tags$li("Tiempo estimado: 6-8 meses")
+      )
+    )
+  ),
+  column(4,
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); height: 100%;",
+      h4("Áreas de Enfoque", style = "color: #16A085; margin-bottom: 15px;"),
+      tags$ul(
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+        tags$li("Salud mental comunitaria"),
+        tags$li("Patrones de comportamiento económico"),
+        tags$li("Indicadores de bienestar social")
+      )
+    )
+  )
+)
+
+fluidRow(
+  column(12,
+    div(
+      style = "margin-top: 20px; padding: 25px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      h4("Cronograma Tentativo", style = "color: #2C3E50; margin-bottom: 15px;"),
+      timevisOutput("redesign_timeline", height = "200px")
+    )
+  )
+)
+```
+
+```{r}
+#| context: server
+
+output$redesign_timeline <- renderTimevis({
+  timeline_data <- data.frame(
+    id = 1:5,
+    content = c(
+      "Inicio del Rediseño",
+      "Desarrollo de Nuevos Módulos",
+      "Pruebas Piloto",
+      "Ajustes y Validación",
+      "Implementación"
+    ),
+    start = as.Date(c(
+      "2025-06-01",
+      "2025-07-15",
+      "2025-09-01",
+      "2025-10-15",
+      "2025-12-01"
+    )),
+    end = as.Date(c(
+      "2025-07-15",
+      "2025-09-01",
+      "2025-10-15",
+      "2025-12-01",
+      "2026-01-15"
+    )),
+    type = "range",
+    style = sprintf("background-color: %s; color: white;", 
+                   c(theme_colors$primary, theme_colors$secondary, 
+                     theme_colors$accent, adjustcolor(theme_colors$primary, 0.7),
+                     theme_colors$secondary))
+  )
+  
+  timevis(
+    timeline_data,
+    options = list(
+      stack = TRUE,
+      showCurrentTime = FALSE,
+      height = "200px",
+      margin = list(
+        item = 20,
+        axis = 40
+      )
+    )
+  ) %>%
+    setOptions(list(
+      timeAxis = list(scale = "month", step = 1)
+    ))
+})
+```
+
+### Aplicación de modelos predictivos
+```{r}
+#| panel: fill
+fluidRow(
+  column(6,      
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      highchartOutput("prediction_chart")
+    )
+  ), 
+  column(6,
+    div(
+      style = "padding: 20px; background-color: #ECF0F1; border-radius: 8px;",
+      h4("Modelos Predictivos y Análisis", 
+         style = "color: #2C3E50; margin-bottom: 15px;"),
+      
+      p("La implementación de modelos predictivos utilizando los datos de las encuestas rediseñadas 
+        nos permitirá desarrollar estimaciones y predicciones más precisas de la percepción ciudadana.", 
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;"),
+      
+      h5("Requerimientos Técnicos", 
+         style = "color: #16A085; margin-top: 20px; margin-bottom: 10px;"),
+      tags$ul(
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+        tags$li("Infraestructura computacional avanzada"),
+        tags$li("Rediseño orientado a mantener confiabilidad"),
+        tags$li("Validación cruzada de predicciones")
+      ),
+      
+      div(
+        style = "margin-top: 20px; padding: 15px; background-color: white; border-radius: 5px;",
+        h5("Beneficios Esperados", 
+           style = "color: #16A085; margin-bottom: 10px;"),
+        tags$ul(
+          style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+          tags$li("Identificación temprana de tendencias"),
+          tags$li("Optimización de recursos para OSCs"),
+          tags$li("Mejora en la toma de decisiones")
+        )
+      )
+    )
+  ) 
+)
+```
+
+```{r}
+#| context: server
+
+output$prediction_chart <- renderHighchart({
+  hc <- highchart() %>%
+  hc_title(
+    text = "Satisfacci\u00F3n Ciudadana con Proyecciones",
+    style = list(color = theme_colors$primary, fontSize = "16px")
+  ) %>%
+  hc_xAxis(
+    categories = as.character(pred_data$year),
+    title = list(text = "A\u00F1o"),
+    plotBands = list(
+      list(
+        from = n_hist - 0.5,
+        to = total_points - 0.5,
+        color = adjustcolor(theme_colors$accent, alpha.f = 0.1),
+        label = list(
+          text = "Proyecci\u00F3n",
+          style = list(color = theme_colors$accent)
+        )
+      )
+    )
+  ) %>%
+  hc_yAxis(
+    title = list(text = "Nivel de Satisfacci\u00F3n"),
+    min = 7,
+    max = 10
+  ) %>%
+  hc_add_series(
+    name = "Datos Hist\u00F3ricos",
+    data = list_parse2(historical_data),
+    color = theme_colors$primary,
+    marker = list(radius = 4),
+    type = "line"
+  ) %>%
+  hc_add_series(
+    name = "Predicci\u00F3n",
+    data = list_parse2(prediction_data),
+    color = theme_colors$accent,
+    dashStyle = "Dash",
+    marker = list(radius = 4),
+    type = "line"
+  ) %>%
+  hc_add_series(
+    name = "Conexi\u00F3n",
+    data = list_parse2(connecting_line_data),
+    color = "orange",
+    dashStyle = "Dash",
+    marker = list(enabled = FALSE),
+    enableMouseTracking = FALSE,
+    showInLegend = FALSE,
+    type = "line"
+  ) %>%
+  hc_add_series(
+    name = "Intervalo de Confianza",
+    data = list_parse2(arearange_data),
+    type = "arearange",
+    color = adjustcolor(theme_colors$accent, alpha.f = 0.2),
+    linkedTo = ":previous"
+  
+)
+    
+  hc
+})
+```
+
+
+### Desarrollo de Modelos Geo-Estadísticos
+
+```{r}
+#| panel: fill
+fluidRow(
+  column(6,      
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      highchart(type = "map") %>%
+        hc_chart(
+          style = list(fontFamily = "Montserrat")
+        ) %>%
+        hc_title(
+          text = "Satisfacción en Servicios de Agua en Chihuahua",
+          style = list(
+            color = theme_colors$primary,
+            fontSize = "16px",
+            fontFamily = "Montserrat"
+          )
+        ) %>%
+        hc_subtitle(
+          text = "Municipios por Clasificación Urbana",
+          style = list(
+            color = theme_colors$secondary,
+            fontFamily = "Montserrat"
+          )
+        ) %>%
+        hc_add_series_map(
+          map = shihuahua_json, 
+          df = shihuahua_satisf, 
+          value = "satisfaction",
+          joinBy = c("CVE_MUN", "CVE_MUN"),
+          name = "Satisfacción",
+          dataLabels = list(enabled = FALSE),
+          states = list(
+            hover = list(
+              color = theme_colors$accent
+            )
+          ),
+          color = case_when(
+            shihuahua_satisf$CVE_MUN %in% c("019", "037") ~ "#0000FF",
+            shihuahua_satisf$CVE_MUN %in% c("017", "050") ~ "#FF8C00",
+            TRUE ~ "transparent"
+          )
+        ) %>%
+        hc_mapNavigation(
+          enabled = TRUE,
+          buttons = list(
+            zoomIn = list(
+              position = list(
+                align = "left",
+                verticalAlign = "top",
+                x = 0,
+                y = 0
+              )
+            ),
+            zoomOut = list(
+              position = list(
+                align = "left",
+                verticalAlign = "top",
+                x = 0,
+                y = 28
+              )
+            )
+          )
+        ) %>%
+        hc_tooltip(
+          headerFormat = "",
+          pointFormat = paste0(
+            "<b>{point.properties.NOM_MUN}</b><br>",
+            "Clasificación: {point.classification}<br>",
+            "Satisfacción: {point.value:.1f}"
+          )
+        ) %>%
+        hc_legend(enabled = FALSE) %>%
+        hc_credits(enabled = FALSE)
+    )
+  ), 
+  column(6,
+    div(
+      style = "padding: 20px; background-color: #ECF0F1; border-radius: 8px; height: 100%;",
+      p("El desarrollo de modelos geo-estadísticos permitirá la integración y comparación 
+        con otras ciudades, considerando las características únicas de cada territorio.", 
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;"),
+      
+      h4("Objetivos Clave", 
+         style = "color: #16A085; margin-top: 20px; margin-bottom: 10px;"),
+      tags$ul(
+        style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+        tags$li("Expansión del modelo 'Así Estamos' a otras ciudades"),
+        tags$li("Realización de estudios piloto comparativos"),
+        tags$li("Desarrollo de métricas de comparación estandarizadas")
+      ),
+      
+      div(
+        style = "margin-top: 20px; padding: 15px; background-color: white; border-radius: 5px;",
+        h4("Beneficios Esperados", 
+           style = "color: #16A085; margin-bottom: 10px;"),
+        tags$ul(
+          style = "color: #2C3E50; font-size: 1.1em; line-height: 1.6;",
+          tags$li("Análisis comparativo entre ciudades"),
+          tags$li("Identificación de patrones geográficos"),
+          tags$li("Evaluación de impacto de políticas públicas")
+        )
+      )
+    )
+  )
+)
+```
+
+### Modelos de Tiempo-Espacio
+
+Esta fase integra el análisis temporal y espacial para evaluar el impacto de intervenciones y factores geográficos en las comunidades.
+```{r}
+#| panel: fill
+fluidRow(
+  column(6,      
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      highchartOutput("map_chart")
+    )
+  ),
+  column(6,
+    div(
+      style = "padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      highchartOutput("time_chart"),
+      uiOutput("comparison_warning")
+    )
+  )
+)
+
+fluidRow(
+  column(12,
+    div(
+      style = "margin-top: 20px; padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+      h4("Requisitos de Implementación", 
+         style = "color: #16A085; margin-bottom: 15px;"),
+      div(
+        style = "display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px;",
+        div(
+          style = "padding: 15px; background-color: #ECF0F1; border-radius: 5px;",
+          h5("Datos", style = "color: #2C3E50;"),
+          tags$ul(
+            style = "color: #2C3E50;",
+            tags$li("Mínimo 5 años de datos históricos"),
+            tags$li("Al menos 4 territorios comparables"),
+            tags$li("Series temporales completas")
+          )
+        ),
+        div(
+          style = "padding: 15px; background-color: #ECF0F1; border-radius: 5px;",
+          h5("Recursos", style = "color: #2C3E50;"),
+          tags$ul(
+            style = "color: #2C3E50;",
+            tags$li("Infraestructura computacional avanzada"),
+            tags$li("Equipo especializado en análisis espacial"),
+            tags$li("Herramientas de visualización geográfica")
+          )
+        ),
+        div(
+          style = "padding: 15px; background-color: #ECF0F1; border-radius: 5px;",
+          h5("Resultados Esperados", style = "color: #2C3E50;"),
+          tags$ul(
+            style = "color: #2C3E50;",
+            tags$li("Evaluación de intervenciones"),
+            tags$li("Análisis de factores geográficos"),
+            tags$li("Predicciones espaciotemporales")
+          )
+        )
+      )
+    )
+  )
+)
+```
+
+
+```{r}
+#| context: server
+
+
+ selected_muns <- reactiveVal(character(0))
+  selected_types <- reactiveVal(character(0))
+ output$map_chart <- renderHighchart({
+  highchart(type = "map") %>%
+    hc_chart(
+      style = list(fontFamily = "Montserrat")
+    ) %>%
+    hc_title(
+      text = "Satisfacción en Servicios Públicos",
+      style = list(
+        color = theme_colors$primary,
+        fontSize = "16px",
+        fontFamily = "Montserrat"
+      )
+    ) %>%
+    hc_add_series_map(
+      map = shihuahua_json, 
+      df = shihuahua_satisf, 
+      value = "satisfaction",
+      joinBy = c("CVE_MUN", "CVE_MUN"),
+      name = "Satisfacción",
+      dataLabels = list(enabled = FALSE),
+      states = list(
+        hover = list(
+          color = theme_colors$accent
+        )
+      ),
+        borderColor = "black",
+        borderWidth = 0.5,
+        allowPointSelect = TRUE,
+        cursor = "pointer",
+        color = case_when(
+          shihuahua_satisf$CVE_MUN %in% c("019", "037") ~ "#0000FF",
+          shihuahua_satisf$CVE_MUN %in% c("017", "050") ~ "#FF8C00",
+          TRUE ~ "transparent"
+        ),
+        events = list(
+          click = JS("function(e) {
+            var mun = e.point.CVE_MUN;
+            Shiny.setInputValue('clicked_mun', mun);
+          }")
+        )
+      ) %>%
+      hc_colorAxis(showInLegend = FALSE) %>%
+      hc_tooltip(
+        headerFormat = "", 
+        pointFormat = '<b>{point.properties.NOM_MUN}</b><br>Satisfaccion: {point.value}<br>Click para alternar seleccion'
+      ) %>%
+      hc_mapNavigation(enabled = TRUE) %>%
+      hc_size(height = 350, width = 350)
+  })
+  
+  observeEvent(input$clicked_mun, {
+  current_selections <- selected_muns()
+  clicked <- input$clicked_mun
+  
+  if(clicked %in% current_selections) {
+    selected_muns(setdiff(current_selections, clicked))
+    # Update selected types
+    selected_types(shihuahua_satisf$classification[shihuahua_satisf$CVE_MUN %in% selected_muns()])
+  } else {
+    selected_muns(c(current_selections, clicked))
+    # Update selected types
+    selected_types(shihuahua_satisf$classification[shihuahua_satisf$CVE_MUN %in% c(current_selections, clicked)])
+  }
+})
+  output$comparison_warning <- renderUI({
+  selected <- selected_muns()
+  types <- selected_types()
+  
+  # Only show warning if comparing urban with semi-urban
+  if(length(selected) > 1 && 
+     "Urbano" %in% types && 
+     "Semi-urbano" %in% types) {
+    div(
+      style = paste0(
+        "margin-top: 15px; ",
+        "padding: 10px; ",
+        "background-color: ", adjustcolor(theme_colors$accent, alpha.f = 0.1), "; ",
+        "border-left: 4px solid ", theme_colors$accent, "; ",
+        "border-radius: 4px;"
+      ),
+      h5("Nota sobre Comparabilidad", 
+         style = paste0("color: ", theme_colors$accent, "; margin-bottom: 5px;")),
+      p("Las comparaciones directas entre municipios urbanos y semi-urbanos deben interpretarse 
+        con cautela debido a diferencias estructurales en demografía, infraestructura y recursos.",
+        style = "color: #2C3E50; font-size: 0.9em; margin-bottom: 0;")
+    )
+  }
+})
+output$time_chart <- renderHighchart({
+  selected <- selected_muns()
+  
+  hc <- highchart() %>%
+    hc_chart(
+      style = list(fontFamily = "Montserrat")
+    ) %>%
+    hc_title(
+      text = "Evolución Temporal de la Satisfacción",
+      style = list(
+        color = theme_colors$primary,
+        fontSize = "16px",
+        fontFamily = "Montserrat"
+      )
+    ) %>%
+    hc_xAxis(
+      categories = years,
+      title = list(text = "Año")
+    ) %>%
+    hc_yAxis(
+      title = list(text = "Nivel de Satisfacción"),
+      min = 0,
+      max = 10
+    ) %>%
+    hc_tooltip(shared = TRUE, valueDecimals = 1)
+    
+  if(length(selected) > 0) {
+    for(mun in selected) {
+      mun_color <- if(mun %in% c("019", "037")) "#0000FF" else "#FF8C00"
+      hc <- hc %>%
+        hc_add_series(
+          name = mun_names[[mun]],
+          data = time_data[[mun]],
+          color = mun_color
+        )
+    }
+  }
+  
+  hc
+})
+
+```
+
